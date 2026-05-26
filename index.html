@@ -14,7 +14,6 @@
   <!-- Firebase SDK -->
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
-  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
   <style>
     :root {
       /* Dark Mode Variables (Default) */
@@ -1301,7 +1300,31 @@
 
 <body>
 
-  <!-- ══ TOPBAR ══ -->
+  <!-- FILE:// WARNING BANNER — auto-hides when served over HTTP -->
+  <div id="file-protocol-warn" style="
+    display:none;
+    position:fixed;top:0;left:0;right:0;z-index:9999;
+    background:linear-gradient(90deg,#b45309,#d97706);
+    color:#fff;font-family:sans-serif;font-size:13px;
+    padding:10px 20px;text-align:center;
+    box-shadow:0 2px 12px rgba(0,0,0,.5);
+    line-height:1.6;
+  ">
+    ⚠️ <strong>Firebase will not connect when opened as a local file.</strong>
+    You must open this via a web server. Run this command in your Downloads folder:
+    <code style="background:rgba(0,0,0,.3);padding:2px 8px;border-radius:4px;margin:0 6px;">node serve.js</code>
+    then open <strong>http://localhost:3000</strong> in your browser.
+    <button onclick="document.getElementById('file-protocol-warn').style.display='none'"
+      style="margin-left:16px;background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.5);
+      color:#fff;padding:2px 10px;border-radius:4px;cursor:pointer;font-size:12px;">✕ Dismiss</button>
+  </div>
+  <script>
+    if (location.protocol === 'file:') {
+      document.getElementById('file-protocol-warn').style.display = 'block';
+    }
+  </script>
+
+
   <div id="topbar">
     <div class="brand">
       <span class="star">🥃</span>
@@ -1651,7 +1674,6 @@
     };
 
     let db;
-    let auth;
     let firebaseReady = false;
 
     function setDbDot(color, title) {
@@ -1663,38 +1685,33 @@
       }
     }
 
-    // Initialize Firebase with anonymous auth so Firestore rules pass
+    // Initialize Firebase — rules are open (if true), no auth needed
     try {
-      firebase.initializeApp(firebaseConfig);
+      if (!firebase.apps.length) {
+        firebase.initializeApp(firebaseConfig);
+      }
       db = firebase.firestore();
-      auth = firebase.auth();
-
-      // Enable offline persistence so saves work even with brief disconnects
-      db.enablePersistence({ synchronizeTabs: true }).catch(err => {
-        if (err.code !== 'failed-precondition' && err.code !== 'unimplemented') {
-          console.warn('Persistence error:', err);
-        }
-      });
 
       setDbDot('#f59e0b', 'Connecting to Firebase...');
 
-      // Sign in anonymously — required for Firestore security rules
-      auth.signInAnonymously().then(() => {
-        console.log('Firebase: signed in anonymously. Firestore ready.');
-        firebaseReady = true;
-        setDbDot('#10b981', 'Firebase Connected ✓');
-        // Now that auth is ready, load data from Firebase
-        loadFolderList();
-        loadFolderData();
-      }).catch(err => {
-        console.error('Firebase anonymous sign-in failed:', err);
-        setDbDot('#ef4444', 'Firebase Auth Error: ' + err.message);
-        showToast('Firebase auth failed. Data will only save locally.', 'err');
-      });
+      // Test connectivity: try to read the folders collection
+      db.collection("folders").limit(1).get()
+        .then(() => {
+          firebaseReady = true;
+          setDbDot('#10b981', 'Firebase Connected ✓');
+          console.log('✓ Firebase connected successfully.');
+          loadFolderList();
+          loadFolderData();
+        })
+        .catch(err => {
+          console.error('Firebase connectivity test failed:', err);
+          setDbDot('#ef4444', 'Firebase Error: ' + (err.code || err.message));
+          showToast('Firebase error: ' + err.message, 'err');
+        });
 
     } catch (err) {
       console.error('Firebase initialization failed:', err);
-      setDbDot('#ef4444', 'Firebase Init Error');
+      setDbDot('#ef4444', 'Firebase Init Error: ' + err.message);
     }
 
     // Query folders collection and populate topbar select dropdown
