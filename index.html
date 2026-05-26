@@ -14,6 +14,7 @@
   <!-- Firebase SDK -->
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-auth-compat.js"></script>
   <style>
     :root {
       /* Dark Mode Variables (Default) */
@@ -1313,9 +1314,22 @@
       <button class="nav-tab" id="tab-admin" onclick="switchPanel('admin')">⚙ Admin</button>
       <button class="nav-tab active" id="tab-dash" onclick="switchPanel('dash')">📊 Dashboard</button>
     </div>
-    <div class="topbar-right">
+    <div class="topbar-right" style="display:flex;align-items:center;gap:12px;">
+      <!-- Firebase connection status indicator -->
+      <span id="db-status" title="Firebase Disconnected"
+        style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ef4444;box-shadow:0 0 6px #ef4444;transition:all .3s;"></span>
+
+      <span style="font-size:11px;color:var(--text-muted);letter-spacing:.05em;text-transform:uppercase;">Folder:</span>
+      <select id="folder-select" class="form-select"
+        style="width:130px;padding:4px 8px;font-size:12px;background:var(--bg-card2);border:1px solid var(--border-bright);color:var(--gold-light);border-radius:4px;"
+        onchange="switchFolder(this.value)">
+        <option value="Default">Default</option>
+      </select>
+      <button class="btn btn-ghost btn-sm" onclick="createNewFolder()" style="padding:4px 10px;font-size:11px;">+
+        New</button>
+
       <span id="sheet-label">Sheet</span>
-      <input id="sheet-name-input" class="form-input" style="width:110px" value="MAR-26"
+      <input id="sheet-name-input" class="form-input" style="width:90px;padding:4px 8px;" value="MAR-26"
         onchange="S.sheetName=this.value;save()">
       <button class="btn btn-ghost btn-sm" id="theme-toggle" onclick="toggleTheme()">☀️ Light Mode</button>
     </div>
@@ -1481,8 +1495,17 @@
 
     <!-- ═══ DASHBOARD PANEL ═══ -->
     <div id="panel-dash" class="panel active">
-      <div class="section-title">Sales Dashboard</div>
-      <div class="section-sub" id="dash-subtitle">Overview & Export</div>
+      <div
+        style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px;">
+        <div>
+          <div class="section-title">Sales Dashboard</div>
+          <div class="section-sub" id="dash-subtitle">Overview & Export</div>
+        </div>
+        <div class="badge badge-jm" id="dash-active-folder-badge"
+          style="font-size:12px;padding:6px 14px;border-radius:6px;font-weight:600;display:flex;align-items:center;gap:6px;">
+          📂 Folder: <span id="dash-active-folder-name">Default</span>
+        </div>
+      </div>
 
       <div class="stats-row" id="stat-cards"></div>
 
@@ -1615,6 +1638,8 @@
       sheetName: 'MAR-26',
     };
 
+    let activeFolder = localStorage.getItem('ssd_active_folder') || 'Default';
+
     // Firebase Configuration
     const firebaseConfig = {
       apiKey: "AIzaSyDQiDsZqZCCGVNw0Fu6cyAh8I2iiOt73uU",
@@ -1625,18 +1650,183 @@
       appId: "1:1088516112300:web:2c723ce8f93e81029fc409"
     };
 
-    // Initialize Firebase compatibly
+    let db;
+    let auth;
+    let firebaseReady = false;
+
+    function setDbDot(color, title) {
+      const dot = document.getElementById('db-status');
+      if (dot) {
+        dot.style.backgroundColor = color;
+        dot.style.boxShadow = `0 0 8px ${color}`;
+        dot.title = title;
+      }
+    }
+
+    // Initialize Firebase with anonymous auth so Firestore rules pass
     try {
       firebase.initializeApp(firebaseConfig);
-      const db = firebase.firestore();
-      window.docRef = db.collection("ssd_data").doc("state");
-      console.log("Firebase initialized successfully.");
+      db = firebase.firestore();
+      auth = firebase.auth();
+
+      // Enable offline persistence so saves work even with brief disconnects
+      db.enablePersistence({ synchronizeTabs: true }).catch(err => {
+        if (err.code !== 'failed-precondition' && err.code !== 'unimplemented') {
+          console.warn('Persistence error:', err);
+        }
+      });
+
+      setDbDot('#f59e0b', 'Connecting to Firebase...');
+
+      // Sign in anonymously — required for Firestore security rules
+      auth.signInAnonymously().then(() => {
+        console.log('Firebase: signed in anonymously. Firestore ready.');
+        firebaseReady = true;
+        setDbDot('#10b981', 'Firebase Connected ✓');
+        // Now that auth is ready, load data from Firebase
+        loadFolderList();
+        loadFolderData();
+      }).catch(err => {
+        console.error('Firebase anonymous sign-in failed:', err);
+        setDbDot('#ef4444', 'Firebase Auth Error: ' + err.message);
+        showToast('Firebase auth failed. Data will only save locally.', 'err');
+      });
+
     } catch (err) {
-      console.warn("Firebase initialization failed:", err);
+      console.error('Firebase initialization failed:', err);
+      setDbDot('#ef4444', 'Firebase Init Error');
+    }
+
+    // Query folders collection and populate topbar select dropdown
+    function loadFolderList() {
+      if (!db || !firebaseReady) return;
+      db.collection("folders").get().then(snapshot => {
+        const select = document.getElementById('folder-select');
+        if (!select) return;
+
+        const folders = new Set();
+        folders.add('Default'); // Always ensure Default is present
+
+        snapshot.forEach(doc => {
+          folders.add(doc.id);
+        });
+
+        select.innerHTML = Array.from(folders).map(folder => {
+          return `<option value="${folder}" ${folder === activeFolder ? 'selected' : ''}>${folder}</option>`;
+        }).join('');
+
+        const badgeName = document.getElementById('dash-active-folder-name');
+        if (badgeName) badgeName.textContent = activeFolder;
+      }).catch(err => {
+        console.error("Error loading folders list:", err);
+      });
+    }
+
+    // Switch folder and fetch its data
+    function switchFolder(folderName) {
+      activeFolder = folderName;
+      localStorage.setItem('ssd_active_folder', folderName);
+
+      const badgeName = document.getElementById('dash-active-folder-name');
+      if (badgeName) badgeName.textContent = folderName;
+
+      showToast(`Loading folder "${folderName}"...`, 'info');
+      loadFolderData();
+    }
+
+    // Create a new folder
+    function createNewFolder() {
+      const name = prompt("Enter a name for the new folder:");
+      if (!name) return;
+      const folderName = name.trim();
+      if (!folderName) return;
+
+      const select = document.getElementById('folder-select');
+      let exists = false;
+      if (select) {
+        for (let option of select.options) {
+          if (option.value.toLowerCase() === folderName.toLowerCase()) {
+            exists = true;
+            break;
+          }
+        }
+      }
+
+      if (exists) {
+        showToast(`Folder "${folderName}" already exists!`, 'err');
+        switchFolder(folderName);
+        return;
+      }
+
+      // Initialize with default state
+      S = {
+        products: JSON.parse(JSON.stringify(DEFAULT_PRODUCTS)),
+        buyers: [],
+        purchases: {},
+        discounts: JSON.parse(JSON.stringify(DEFAULT_DISCOUNTS)),
+        sheetName: 'MAR-26',
+      };
+
+      activeFolder = folderName;
+      localStorage.setItem('ssd_active_folder', folderName);
+
+      save();
+      loadFolderList();
+
+      renderProducts();
+      renderBuyers();
+      renderGrid();
+      renderPdfProductSel();
+      renderDiscounts();
+      renderDash();
+
+      showToast(`Folder "${folderName}" created!`, 'ok');
+    }
+
+    // Fetch the folder data from Firebase
+    function loadFolderData() {
+      if (!db || !firebaseReady) return;
+      db.collection("folders").doc(activeFolder).get().then(doc => {
+        if (doc.exists) {
+          const data = doc.data();
+          S.products = data.products || JSON.parse(JSON.stringify(DEFAULT_PRODUCTS));
+          S.buyers = data.buyers || [];
+          S.purchases = data.purchases || {};
+          S.discounts = data.discounts || JSON.parse(JSON.stringify(DEFAULT_DISCOUNTS));
+          S.sheetName = data.sheetName || 'MAR-26';
+
+          Object.keys(DEFAULT_DISCOUNTS).forEach(g => {
+            if (!S.discounts[g]) S.discounts[g] = { ...DEFAULT_DISCOUNTS[g] };
+          });
+
+          localStorage.setItem('ssd_sales_v2', JSON.stringify(S));
+
+          renderProducts();
+          renderBuyers();
+          renderGrid();
+          renderPdfProductSel();
+          renderDiscounts();
+          renderDash();
+
+          showToast(`Synced folder "${activeFolder}"`, 'ok');
+        } else {
+          console.log(`Document for folder "${activeFolder}" not found. Saving current state.`);
+          save();
+        }
+      }).catch(err => {
+        console.error(`Error loading folder "${activeFolder}" data:`, err);
+        if (err.code === 'permission-denied') {
+          showToast('Firebase permission denied. Please update Firestore rules to allow read/write for authenticated users.', 'err');
+          setDbDot('#ef4444', 'Permission Denied — update Firestore rules');
+        } else {
+          showToast('Failed to sync from Firebase: ' + err.message, 'err');
+          setDbDot('#ef4444', 'Sync Error');
+        }
+      });
     }
 
     function load() {
-      // First load from local storage (for instantaneous load and offline compatibility)
+      // Load from localStorage first for instant UI (offline-first)
       try {
         const d = localStorage.getItem('ssd_sales_v2');
         if (d) { const p = JSON.parse(d); Object.assign(S, p); }
@@ -1645,43 +1835,59 @@
         });
       } catch (e) { }
 
-      // Then fetch from Firebase Firestore to sync remote data
-      if (window.docRef) {
-        window.docRef.get().then(doc => {
-          if (doc.exists) {
-            const data = doc.data();
-            Object.assign(S, data);
-            Object.keys(DEFAULT_DISCOUNTS).forEach(g => {
-              if (!S.discounts[g]) S.discounts[g] = { ...DEFAULT_DISCOUNTS[g] };
-            });
-            localStorage.setItem('ssd_sales_v2', JSON.stringify(S));
+      // Render with local data immediately
+      renderProducts();
+      renderBuyers();
+      renderGrid();
+      renderPdfProductSel();
+      renderDiscounts();
+      renderDash();
 
-            // Re-render the tables to reflect updated Firebase data
-            if (typeof renderDash === 'function') renderDash();
-            if (typeof renderProducts === 'function') renderProducts();
-            if (typeof renderBuyers === 'function') renderBuyers();
-            if (typeof renderGrid === 'function') renderGrid();
-            console.log("Firebase state synchronized.");
-          }
-        }).catch(err => {
-          console.warn("Could not load from Firebase:", err);
-        });
+      // Firebase load is triggered AFTER auth completes (in signInAnonymously callback)
+      // If firebase was already ready (e.g. page refresh with cached token), load now
+      if (firebaseReady) {
+        loadFolderList();
+        loadFolderData();
       }
+    }
+
+    // Deep-clean an object: replace undefined with null, strip non-serializable values
+    function sanitizeForFirestore(obj) {
+      return JSON.parse(JSON.stringify(obj, (key, value) => {
+        if (value === undefined) return null;
+        return value;
+      }));
     }
 
     function save() {
       try {
         localStorage.setItem('ssd_sales_v2', JSON.stringify(S));
+        localStorage.setItem('ssd_active_folder', activeFolder);
 
-        // Backup to Firebase
-        if (window.docRef) {
-          window.docRef.set(S).then(() => {
-            console.log("Firebase backup saved.");
-          }).catch(err => {
-            console.warn("Could not backup to Firebase:", err);
+        if (db && firebaseReady) {
+          const payload = sanitizeForFirestore({
+            products: S.products,
+            buyers: S.buyers,
+            purchases: S.purchases,
+            discounts: S.discounts,
+            sheetName: S.sheetName,
+            lastUpdated: new Date().toISOString(),
           });
+
+          db.collection("folders").doc(activeFolder).set(payload).then(() => {
+            console.log(`✓ Saved folder "${activeFolder}" to Firebase.`);
+            setDbDot('#10b981', 'Firebase Connected ✓');
+          }).catch(err => {
+            console.error(`✗ Firebase save error for folder "${activeFolder}":`, err);
+            setDbDot('#ef4444', 'Sync Error: ' + err.code);
+            showToast('Firebase save failed: ' + err.message, 'err');
+          });
+        } else if (!firebaseReady) {
+          console.log('Firebase not ready yet — saved locally only.');
         }
-      } catch (e) { }
+      } catch (e) {
+        console.error('save() error:', e);
+      }
     }
     load();
 
